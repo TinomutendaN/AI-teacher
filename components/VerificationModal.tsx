@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputInstance,
   TouchableOpacity,
   TouchableWithoutFeedback,
   View,
@@ -31,7 +32,7 @@ export default function VerificationModal({
 }: Props) {
   const [code, setCode] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<TextInputInstance>(null);
 
   useEffect(() => {
     if (visible) {
@@ -131,7 +132,7 @@ export default function VerificationModal({
 
           <TouchableOpacity style={styles.resendBtn} onPress={handleResend}>
             <Text style={styles.resendText}>
-              Didn't receive it?{" "}
+              Didn&apos;t receive it?{" "}
               <Text style={styles.resendLink}>Resend</Text>
             </Text>
           </TouchableOpacity>

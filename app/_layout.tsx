@@ -2,8 +2,7 @@ import "../global.css";
 
 import { posthog } from "@/lib/posthog";
 import { useLanguageStore } from "@/store/languageStore";
-import { useUser } from "@clerk/expo";
-import { ClerkProvider } from "@clerk/expo";
+import { ClerkProvider, useUser } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
 import { useFonts } from "expo-font";
 import { Stack, useGlobalSearchParams, usePathname } from "expo-router";
@@ -22,14 +21,15 @@ SplashScreen.preventAutoHideAsync();
 function ClerkIdentifier() {
   const { isSignedIn, user, isLoaded } = useUser();
   const { selectedLanguage } = useLanguageStore();
+  const userId = user?.id;
 
   useEffect(() => {
-    if (!isLoaded || !isSignedIn || !user) return;
-    posthog.identify(user.id, {
+    if (!isLoaded || !isSignedIn || !userId) return;
+    posthog.identify(userId, {
       $set_once: { signup_date: new Date().toISOString() },
       $set: { preferred_language: selectedLanguage ?? null },
     });
-  }, [isLoaded, isSignedIn, user?.id, selectedLanguage]);
+  }, [isLoaded, isSignedIn, userId, selectedLanguage]);
 
   return null;
 }
@@ -70,7 +70,7 @@ export default function RootLayout() {
     <PostHogProvider
       client={posthog}
       autocapture={{
-        captureScreens: true,
+        captureScreens: false, // Manual tracking with Expo Router (see useEffect above)
         captureTouches: true,
         propsToCapture: ["testID"],
         maxElementsCaptured: 20,
