@@ -121,7 +121,6 @@ VISION_AGENT_URL=http://localhost:8000
 OPENAI_API_KEY=
 ```
 
-Replace the placeholder values with your real credentials. You can get these by signing up at: [**Stream**](https://jsm.dev/lingua-stream), [**PostHog**](https://jsm.dev/lingua-posthog), [**Clerk**](https://jsm.dev/lingua-clerk).
 
 **Running the Project**
 
