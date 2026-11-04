@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "duolingo-clone",
-    "slug": "duolingo-clone",
+    "name": "Lingua",
+    "slug": "lingua",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "duolingoclone",
+    "scheme": "lingua",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
