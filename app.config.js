@@ -27,7 +27,8 @@ export default {
       favicon: "./assets/images/favicon.png",
     },
     plugins: [
-      "expo-router",
+      // apiRoutes must be enabled explicitly (SDK 58+) for app/api/*+api.ts
+      ["expo-router", { apiRoutes: true }],
       [
         "expo-splash-screen",
         {
