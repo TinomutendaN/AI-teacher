@@ -24,6 +24,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { images } from "@/constants/images";
 import { colors } from "@/constants/theme";
+import { FREE_TALKS } from "@/data/conversations";
 import { LESSONS } from "@/data/lessons";
 import { posthog } from "@/lib/posthog";
 import { useLanguageStore } from "@/store/languageStore";
@@ -40,7 +41,9 @@ export default function LessonScreen() {
   const { getToken } = useAuth();
   const { selectedLanguage } = useLanguageStore();
 
-  const lesson = LESSONS.find((l) => l.id === id);
+  // Regular lessons come from LESSONS; AI Teacher tab free-talk sessions from FREE_TALKS
+  const lesson =
+    LESSONS.find((l) => l.id === id) ?? FREE_TALKS.find((l) => l.id === id);
 
   const [client, setClient] = useState<StreamVideoClient | null>(null);
   const [call, setCall] = useState<Call | null>(null);
