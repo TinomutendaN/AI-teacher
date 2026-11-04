@@ -1,4 +1,4 @@
-import { useAuth, useUser } from "@clerk/expo";
+import { useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
 import {
   Image,
@@ -66,7 +66,6 @@ const PLAN_ITEMS = [
 
 export default function HomeScreen() {
   const { user } = useUser();
-  const { signOut } = useAuth();
   const { selectedLanguage } = useLanguageStore();
   const { xpToday, dailyGoal, streak } = useLearningStore();
 
@@ -111,13 +110,6 @@ export default function HomeScreen() {
             <TouchableOpacity activeOpacity={0.7}>
               <Ionicons
                 name="notifications-outline"
-                size={24}
-                color={colors.neutral.textPrimary}
-              />
-            </TouchableOpacity>
-            <TouchableOpacity activeOpacity={0.7} onPress={() => signOut()}>
-              <Ionicons
-                name="log-out-outline"
                 size={24}
                 color={colors.neutral.textPrimary}
               />

@@ -3,7 +3,6 @@ import { useAuth, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
 import {
   Call,
-  CallClosedCaption,
   StreamCall,
   StreamVideo,
   StreamVideoClient,
@@ -31,8 +30,6 @@ import { useLanguageStore } from "@/store/languageStore";
 
 type CallStatus = "idle" | "connecting" | "joined" | "error";
 type AgentStatus = "idle" | "connecting" | "connected" | "failed";
-
-const AGENT_USER_ID = "ai-teacher";
 
 export default function LessonScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -85,7 +82,10 @@ export default function LessonScreen() {
       clientRef.current?.disconnectUser().catch(console.error);
       stopAgentSession(callRef.current?.id ?? null, agentSessionRef.current);
     };
-  }, [isLoaded, user, lesson]);
+    // Depend on user.id, not the user object: Clerk hands out a new user object
+    // when the session refreshes, which would tear down and rejoin the call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, user?.id, lesson?.id]);
 
   async function startCall() {
     if (!user || !lesson) return;
@@ -141,13 +141,6 @@ export default function LessonScreen() {
           "[lesson] call.update failed (agent will use default prompts):",
           updateErr,
         );
-      }
-
-      // Start live captions — transcribes both teacher and student speech in real time
-      try {
-        await streamCall.startClosedCaptions();
-      } catch (e) {
-        console.warn("[lesson] startClosedCaptions failed:", e);
       }
 
       callRef.current = streamCall;
@@ -375,9 +368,29 @@ export default function LessonScreen() {
   );
 }
 
-type PartialCaption = { speaker: "agent" | "user"; text: string };
+// One line of the live transcript. `id` comes from OpenAI so partial updates
+// for the same sentence replace each other instead of stacking up.
+type TranscriptLine = {
+  id: string;
+  speaker: "agent" | "user";
+  text: string;
+  final: boolean;
+};
 
-// Rendered inside StreamCall — accesses live captions and mic state via hooks
+// Shape of the custom events sent by vision-agent/main.py (TranscriptRelay)
+interface TranscriptEvent {
+  custom?: {
+    type?: string;
+    id?: string;
+    speaker?: "agent" | "user";
+    text?: string;
+    final?: boolean;
+  };
+}
+
+const MAX_VISIBLE_LINES = 3;
+
+// Rendered inside StreamCall — accesses mic state via hooks
 function ActiveCallContent({
   agentStatus,
   lesson,
@@ -389,48 +402,38 @@ function ActiveCallContent({
   call: Call;
   onRetry: () => void;
 }) {
-  const { useMicrophoneState, useCallClosedCaptions } = useCallStateHooks();
+  const { useMicrophoneState } = useCallStateHooks();
   const { microphone } = useMicrophoneState();
-  const captions = useCallClosedCaptions();
   const [isHeld, setIsHeld] = useState(false);
-  const [partial, setPartial] = useState<PartialCaption | null>(null);
-  const partialTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lines, setLines] = useState<TranscriptLine[]>([]);
 
-  // Receive real-time partial transcript deltas from the Python agent via Stream custom events
-  interface StreamCustomEvent {
-    custom?: {
-      type?: string;
-      speaker?: "agent" | "user";
-      text?: string;
-    };
-  }
-
+  // Live captions streamed from the Python agent via Stream custom events
   useEffect(() => {
-    const unsubscribe = call.on("custom", (event: StreamCustomEvent) => {
-      const data = event?.custom ?? {};
-      if (data.type === "transcript_partial" && data.text) {
-        setPartial({ speaker: data.speaker ?? "agent", text: data.text });
-        // Auto-clear if no further deltas arrive (speech ended without a final event)
-        if (partialTimerRef.current) clearTimeout(partialTimerRef.current);
-        partialTimerRef.current = setTimeout(() => setPartial(null), 3000);
-      }
+    const unsubscribe = call.on("custom", (event: TranscriptEvent) => {
+      const data = event?.custom;
+      if (data?.type !== "transcript" || !data.id || !data.text) return;
+      const line: TranscriptLine = {
+        id: data.id,
+        speaker: data.speaker ?? "agent",
+        text: data.text,
+        final: data.final ?? false,
+      };
+
+      setLines((prev) => {
+        const existing = prev.find((l) => l.id === line.id);
+        // A late partial can arrive after its final version — ignore it
+        if (existing?.final && !line.final) return prev;
+        const next = existing
+          ? prev.map((l) => (l.id === line.id ? line : l))
+          : [...prev, line];
+        return next.slice(-MAX_VISIBLE_LINES);
+      });
     });
-    return () => {
-      unsubscribe();
-      if (partialTimerRef.current) clearTimeout(partialTimerRef.current);
-    };
+    return () => unsubscribe();
   }, [call]);
 
-  // Clear partial once a committed caption lands (the final transcript is now in captions)
-  useEffect(() => {
-    if (captions.length > 0) {
-      setPartial(null);
-      if (partialTimerRef.current) clearTimeout(partialTimerRef.current);
-    }
-  }, [captions]);
-
   const isReady = agentStatus === "connected";
-  const showCaptions = partial !== null || captions.length > 0;
+  const showCaptions = lines.length > 0;
 
   function handlePressIn() {
     if (!isReady) return;
@@ -456,79 +459,45 @@ function ActiveCallContent({
           ]}
         />
 
-        {/* Live captions: partial (streaming) takes priority, then committed */}
+        {/* Live captions — partial lines grow word by word, then turn solid */}
         {showCaptions ? (
           <View style={styles.captionsContainer}>
-            {partial ? (
-              // Partial caption — grows word by word in real time
-              <View
-                style={[
-                  styles.captionBubble,
-                  partial.speaker === "agent"
-                    ? styles.captionBubbleTeacher
-                    : styles.captionBubbleUser,
-                  styles.captionBubblePartial,
-                ]}
-              >
-                <Text
+            {lines.map((line) => {
+              const isTeacher = line.speaker === "agent";
+              return (
+                <View
+                  key={line.id}
                   style={[
-                    styles.captionSpeaker,
-                    partial.speaker === "agent"
-                      ? styles.captionSpeakerTeacher
-                      : styles.captionSpeakerUser,
+                    styles.captionBubble,
+                    isTeacher
+                      ? styles.captionBubbleTeacher
+                      : styles.captionBubbleUser,
+                    !line.final && styles.captionBubblePartial,
                   ]}
                 >
-                  {partial.speaker === "agent" ? "AI Teacher" : "You"}
-                </Text>
-                <Text
-                  style={[
-                    styles.captionText,
-                    partial.speaker === "agent"
-                      ? styles.captionTextTeacher
-                      : styles.captionTextUser,
-                  ]}
-                >
-                  {partial.text}
-                </Text>
-              </View>
-            ) : (
-              // Committed captions from Stream's closed captions service
-              captions.map((caption: CallClosedCaption, i: number) => {
-                const isTeacher = caption.user?.id === AGENT_USER_ID;
-                return (
-                  <View
-                    key={`${caption.start_time}-${i}`}
+                  <Text
                     style={[
-                      styles.captionBubble,
+                      styles.captionSpeaker,
                       isTeacher
-                        ? styles.captionBubbleTeacher
-                        : styles.captionBubbleUser,
+                        ? styles.captionSpeakerTeacher
+                        : styles.captionSpeakerUser,
                     ]}
                   >
-                    <Text
-                      style={[
-                        styles.captionSpeaker,
-                        isTeacher
-                          ? styles.captionSpeakerTeacher
-                          : styles.captionSpeakerUser,
-                      ]}
-                    >
-                      {isTeacher ? "AI Teacher" : (caption.user?.name ?? "You")}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.captionText,
-                        isTeacher
-                          ? styles.captionTextTeacher
-                          : styles.captionTextUser,
-                      ]}
-                    >
-                      {caption.text}
-                    </Text>
-                  </View>
-                );
-              })
-            )}
+                    {isTeacher ? "AI Teacher" : "You"}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.captionText,
+                      isTeacher
+                        ? styles.captionTextTeacher
+                        : styles.captionTextUser,
+                    ]}
+                  >
+                    {line.text}
+                  </Text>
+                </View>
+              );
+            })}
           </View>
         ) : (
           <>

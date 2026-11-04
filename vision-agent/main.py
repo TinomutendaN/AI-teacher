@@ -1,5 +1,6 @@
+import asyncio
 import os
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -12,10 +13,6 @@ from getstream.models import MemberRequest  # noqa: E402
 from openai.types.realtime.realtime_transcription_session_audio_input_turn_detection_param import ServerVad  # noqa: E402
 from vision_agents.core import Agent, AgentLauncher, User, Runner  # noqa: E402
 from vision_agents.core.instructions import Instructions  # noqa: E402
-from vision_agents.core.llm.events import (  # noqa: E402
-    RealtimeAgentSpeechTranscriptionEvent,
-    RealtimeUserSpeechTranscriptionEvent,
-)
 from vision_agents.plugins import getstream, openai  # noqa: E402
 
 AGENT_USER_ID = "ai-teacher"
@@ -46,6 +43,101 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Stay strictly within the current lesson's vocabulary."
 )
 
+# Lesson prompts from the app describe WHAT to teach. These rules describe HOW to
+# take turns, so they are appended to every prompt (lesson or default).
+TURN_TAKING_RULES = (
+    "VOICE CONVERSATION RULES:\n"
+    "- Keep every reply to one or two short sentences.\n"
+    "- Every question you ask ends your turn. Stop and wait for the student.\n"
+    "- Never pretend the student answered. Only react to speech you actually heard.\n"
+    "- If you did not understand the student, kindly ask them to repeat."
+)
+
+# How often (seconds) partial captions are pushed to the app. OpenAI sends many
+# tiny deltas per second; sending each one as a Stream event would flood the API.
+PARTIAL_FLUSH_INTERVAL = 0.25
+
+TranscriptCallback = Callable[[str, str, str, bool], None]
+
+
+class TeacherRealtime(openai.Realtime):
+    """openai.Realtime plus live transcript callbacks.
+
+    vision-agents 0.6.0 only reports transcripts once a sentence is finished, so
+    we read OpenAI's raw delta events here to get word-by-word captions.
+    on_transcript(item_id, speaker, full_text_so_far, is_final)
+    """
+
+    on_transcript: Optional[TranscriptCallback] = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._texts: dict[str, str] = {}
+
+    def _report(self, item_id: str, speaker: str, delta: str = "", final_text: Optional[str] = None) -> None:
+        if not self.on_transcript or not item_id:
+            return
+        if final_text is not None:
+            text = final_text or self._texts.get(item_id, "")
+            self._texts.pop(item_id, None)
+            self.on_transcript(item_id, speaker, text, True)
+        else:
+            text = self._texts.get(item_id, "") + delta
+            self._texts[item_id] = text
+            self.on_transcript(item_id, speaker, text, False)
+
+    async def _handle_openai_event(self, event: dict) -> None:
+        et = event.get("type")
+        item_id = event.get("item_id", "")
+
+        if et in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
+            self._report(item_id, "agent", delta=event.get("delta", ""))
+        elif et in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
+            self._report(item_id, "agent", final_text=event.get("transcript", ""))
+        elif et == "conversation.item.input_audio_transcription.delta":
+            self._report(item_id, "user", delta=event.get("delta", ""))
+        elif et == "conversation.item.input_audio_transcription.completed":
+            self._report(item_id, "user", final_text=event.get("transcript", ""))
+
+        await super()._handle_openai_event(event)
+
+
+class TranscriptRelay:
+    """Forwards transcripts to the mobile app as Stream custom events.
+
+    Final transcripts are sent right away. Partial ones are batched and sent at
+    most every PARTIAL_FLUSH_INTERVAL seconds. Sending never blocks the audio
+    pipeline because it runs in background tasks.
+    """
+
+    def __init__(self, send: Callable[[dict], Awaitable[None]]):
+        self._send = send
+        self._pending: dict[str, dict] = {}
+        self._flush_task: Optional[asyncio.Task] = None
+
+    def push(self, item_id: str, speaker: str, text: str, final: bool) -> None:
+        payload = {"type": "transcript", "id": item_id, "speaker": speaker, "text": text, "final": final}
+        if final:
+            self._pending.pop(item_id, None)
+            asyncio.create_task(self._safe_send(payload))
+            return
+        self._pending[item_id] = payload
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_later())
+
+    async def _flush_later(self) -> None:
+        await asyncio.sleep(PARTIAL_FLUSH_INTERVAL)
+        pending, self._pending = self._pending, {}
+        for payload in pending.values():
+            await self._safe_send(payload)
+
+    async def _safe_send(self, payload: dict) -> None:
+        try:
+            await self._send(payload)
+        except Exception as e:
+            print(f"[agent] send_custom_event error: {e}")
+
+
 def _require_env(var_name: str) -> None:
     if not os.getenv(var_name):
         raise RuntimeError(f"Missing required environment variable: {var_name}")
@@ -61,7 +153,7 @@ def _language_name_from_call_id(call_id: str) -> Optional[str]:
 async def create_agent(**kwargs) -> Agent:
     return Agent(
         edge=getstream.Edge(),
-        llm=openai.Realtime(
+        llm=TeacherRealtime(
             # server_vad fires on raw audio energy (~100 ms after mic opens) rather
             # than waiting for semantic speech intent detection (~500 ms+).
             # This means the agent stops speaking almost immediately when the user
@@ -105,7 +197,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> Non
     language_name  = LANGUAGE_NAMES.get(language_code) or _language_name_from_call_id(call_id) or "language"
 
     # Apply lesson-specific instructions before joining so the Realtime LLM receives them
-    agent.instructions = Instructions(input_text=system_prompt)
+    agent.instructions = Instructions(input_text=f"{system_prompt}\n\n{TURN_TAKING_RULES}")
 
     # Grant admin role + go live so the agent can publish audio
     try:
@@ -120,41 +212,10 @@ async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> Non
     except Exception as e:
         print(f"[agent] Warning: go_live failed (expected for default call type): {e}")
 
-    # Accumulate transcript deltas and forward them as Stream custom events so the
-    # mobile app can display real-time captions word-by-word as speech is generated.
-    partial_agent: list[str] = []
-    partial_user: list[str] = []
-
-    async def on_transcript_event(event) -> None:
-        if isinstance(event, RealtimeAgentSpeechTranscriptionEvent):
-            if event.mode == "delta" and event.text:
-                partial_agent.append(event.text)
-                try:
-                    await agent.send_custom_event({
-                        "type": "transcript_partial",
-                        "speaker": "agent",
-                        "text": "".join(partial_agent),
-                    })
-                except Exception as e:
-                    print(f"[agent] send_custom_event error: {e}")
-            elif event.mode == "final":
-                partial_agent.clear()
-
-        elif isinstance(event, RealtimeUserSpeechTranscriptionEvent):
-            if event.mode == "delta" and event.text:
-                partial_user.append(event.text)
-                try:
-                    await agent.send_custom_event({
-                        "type": "transcript_partial",
-                        "speaker": "user",
-                        "text": "".join(partial_user),
-                    })
-                except Exception as e:
-                    print(f"[agent] send_custom_event error: {e}")
-            elif event.mode == "final":
-                partial_user.clear()
-
-    agent.subscribe(on_transcript_event)
+    # Stream live captions (teacher + student) to the app as custom events
+    relay = TranscriptRelay(agent.send_custom_event)
+    if isinstance(agent.llm, TeacherRealtime):
+        agent.llm.on_transcript = relay.push
 
     async with agent.join(call):
         # Wait for the student to join (returns immediately if already present)
