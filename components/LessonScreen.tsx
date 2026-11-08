@@ -3,6 +3,7 @@ import { useAuth, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
 import {
   Call,
+  callManager,
   StreamCall,
   StreamVideo,
   StreamVideoClient,
@@ -81,6 +82,7 @@ export default function LessonScreen() {
       callRef.current?.leave().catch(console.error);
       clientRef.current?.disconnectUser().catch(console.error);
       stopAgentSession(callRef.current?.id ?? null, agentSessionRef.current);
+      callManager.stop();
     };
     // Depend on user.id, not the user object: Clerk hands out a new user object
     // when the session refreshes, which would tear down and rejoin the call.
@@ -109,6 +111,12 @@ export default function LessonScreen() {
           image: user.imageUrl || undefined,
         },
       });
+
+      // Play the teacher as media audio instead of phone-call audio.
+      // Android blocks screen recorders from capturing call audio, so the
+      // default "communicator" role leaves the teacher's voice out of recordings.
+      // Echo isn't a problem because the mic is push-to-talk (off while the teacher speaks).
+      callManager.start({ audioRole: "listener" });
 
       const callId = `lesson-${lesson.id}-${user.id}`;
       const streamCall = streamClient.call("default", callId);

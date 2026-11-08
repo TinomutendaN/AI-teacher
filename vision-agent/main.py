@@ -32,8 +32,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "Your turn is OVER at that question mark. Stop speaking. Output nothing else. "
     "Do NOT imagine what the student will say. Do NOT pre-write your reaction. Just stop.\n"
     "REACTING MODE: You have just received actual speech from the student in this turn. "
-    "React to what they actually said — one sentence of praise or correction — "
-    "then either ask them to try again or introduce the next word. Stop.\n"
+    "If they said the word correctly, give one short praise and teach the next word in the same reply. "
+    "If it was unclear or wrong, help them and ask them to try again. Stop.\n"
     "ABSOLUTE RULES:\n"
     "- Never say 'Nice job', 'Perfect', 'Great', or any praise unless the student has "
     "ACTUALLY spoken in the current turn and you heard something from them.\n"
@@ -50,7 +50,22 @@ TURN_TAKING_RULES = (
     "- Keep every reply to one or two short sentences.\n"
     "- Every question you ask ends your turn. Stop and wait for the student.\n"
     "- Never pretend the student answered. Only react to speech you actually heard.\n"
-    "- If you did not understand the student, kindly ask them to repeat."
+    "- If you did not understand the student, kindly ask them to repeat.\n"
+    "WHEN TO MOVE ON (VERY IMPORTANT) - judge every attempt as exactly one of these:\n"
+    "1. CORRECT - you clearly heard the right word, with good pronunciation (a light accent is fine). "
+    "Praise them in a few words and move on to the next word in that same reply. "
+    "Never ask them to repeat a word they already said correctly.\n"
+    "2. UNCLEAR - it was mumbled, cut off, too quiet, or you are not sure what they said. "
+    "Do NOT count it as correct. Ask them to say it again, a little slower or louder. "
+    "Give unclear attempts 2 to 3 more chances.\n"
+    "3. WRONG - you heard them, but the word or pronunciation was wrong. Do NOT move on. "
+    "Say what was off, model the word again (break it into syllables if it helps) and ask them to try again. "
+    "Keep practicing the same word as long as they are still getting it wrong. "
+    "Use a different tip each time.\n"
+    "- Only after about 5 attempts in a row without getting it right: encourage them warmly, "
+    "say you will come back to it, and move on.\n"
+    "- Reacting to an attempt the student ACTUALLY made and then teaching the next word in the same "
+    "reply is allowed and expected. This is not the same as imagining the student's answer."
 )
 
 # How often (seconds) partial captions are pushed to the app. OpenAI sends many
@@ -150,6 +165,22 @@ def _language_name_from_call_id(call_id: str) -> Optional[str]:
     return None
 
 
+def _set_transcription_hint(llm: openai.Realtime, language_name: str, custom: dict) -> None:
+    # vocabulary items arrive as "word: translation" - keep only the word
+    words = [str(v).split(":")[0].strip() for v in custom.get("vocabulary") or []]
+    words += [str(p).strip() for p in custom.get("phrases") or []]
+
+    hint = (
+        f"An English-speaking student is practicing {language_name} with a teacher. "
+        f"They speak English and repeat short {language_name} words and phrases."
+    )
+    if words:
+        hint += " Words they may say: " + ", ".join(words) + "."
+
+    transcription = llm.realtime_session["audio"]["input"]["transcription"]
+    transcription["prompt"] = hint
+
+
 async def create_agent(**kwargs) -> Agent:
     return Agent(
         edge=getstream.Edge(),
@@ -162,7 +193,12 @@ async def create_agent(**kwargs) -> Agent:
                 "type": "realtime",
                 "audio": {
                     "input": {
-                        "transcription": {"model": "gpt-4o-mini-transcribe"},
+                        # gpt-4o-transcribe is more accurate than the mini model on short,
+                        # accented, mixed-language speech like a student repeating words.
+                        # The lesson-specific `prompt` is added in join_call.
+                        "transcription": {"model": "gpt-4o-transcribe"},
+                        # Cleans up close-up phone mic audio before it is transcribed
+                        "noise_reduction": {"type": "near_field"},
                         "turn_detection": ServerVad(
                             type="server_vad",
                             threshold=0.4,         # low enough to catch ambient noise on mic open
@@ -198,6 +234,12 @@ async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> Non
 
     # Apply lesson-specific instructions before joining so the Realtime LLM receives them
     agent.instructions = Instructions(input_text=f"{system_prompt}\n\n{TURN_TAKING_RULES}")
+
+    # Tell the transcriber what the student is likely to say, so short foreign
+    # words like "zwei" or "buenos días" are not misheard as random English.
+    # Must run before agent.join(), because the session config is sent on connect.
+    if isinstance(agent.llm, TeacherRealtime):
+        _set_transcription_hint(agent.llm, language_name, custom)
 
     # Grant admin role + go live so the agent can publish audio
     try:
