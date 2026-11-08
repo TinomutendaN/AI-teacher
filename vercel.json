@@ -1,5 +1,6 @@
 {
   "framework": null,
+  "cleanUrls": true,
   "buildCommand": "npx expo export -p web",
   "outputDirectory": "dist/client",
   "functions": {
