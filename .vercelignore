@@ -1,0 +1,5 @@
+# The Python vision-agent runs on its own host (not Vercel)
+vision-agent/
+android/
+ios/
+prompt_material/

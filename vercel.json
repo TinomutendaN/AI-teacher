@@ -1,4 +1,5 @@
 {
+  "framework": null,
   "buildCommand": "npx expo export -p web",
   "outputDirectory": "dist/client",
   "functions": {
@@ -6,5 +7,10 @@
       "includeFiles": "dist/server/**"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index.ts" }]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.ts"
+    }
+  ]
 }
