@@ -23,12 +23,20 @@ export default {
       predictiveBackGestureEnabled: false,
     },
     web: {
-      output: "static",
+      output: "server",
       favicon: "./assets/images/favicon.png",
     },
     plugins: [
       // apiRoutes must be enabled explicitly (SDK 58+) for app/api/*+api.ts
-      ["expo-router", { apiRoutes: true }],
+      [
+        "expo-router",
+        {
+          apiRoutes: true,
+          // Where release builds send relative fetch("/api/...") calls.
+          // Unset in dev, so the local Expo dev server keeps handling them.
+          origin: process.env.EXPO_PUBLIC_API_ORIGIN,
+        },
+      ],
       [
         "expo-splash-screen",
         {
