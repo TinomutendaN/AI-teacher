@@ -13,5 +13,12 @@
       "source": "/(.*)",
       "destination": "/api/index"
     }
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/download",
+      "permanent": false
+    }
   ]
 }
